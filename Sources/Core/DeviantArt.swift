@@ -50,32 +50,65 @@ final class DeviantArtEngine {
         var candidates: [String] = []
         var title = ""
         var html = ""
+        let id = regexFirst(#"-(\d{6,})(?:[/?#]|$)"#, url)?[1] ?? regexFirst(#"(\d{6,})"#, url)?[1] ?? ""
+        let user = regexFirst(#"deviantart\.com/([^/]+)/"#, url)?[1] ?? ""
+        cb.log("Deviation id: \(id)")
+
         do {
             html = try await f.text(url)
             cb.log("Σελίδα: \(html.count) χαρακτήρες")
             if let m = regexFirst(#"<title>([^<]+)</title>"#, html) { title = htmlUnescape(m[1]) }
-            candidates += videoURLs(in: html)
-            cb.log("Βίντεο στη σελίδα: \(candidates.count)")
         } catch {
             cb.log("Η σελίδα δεν ανοίγει: \(error.localizedDescription)")
         }
 
-        // Fallback 1: DeviantArt internal API (needs deviation id + username)
-        if candidates.isEmpty {
-            let id = regexFirst(#"-(\d{6,})(?:[/?#]|$)"#, url)?[1] ?? regexFirst(#"(\d{6,})"#, url)?[1] ?? ""
-            let user = regexFirst(#"deviantart\.com/([^/]+)/"#, url)?[1] ?? ""
-            if !id.isEmpty {
-                let api = "https://www.deviantart.com/_napi/da-browse/shared_api/deviation/extended_fetch?deviationid=\(id)&username=\(user)&type=art&include_session=false"
-                do {
-                    let j = try await f.text(api, referer: url)
-                    cb.log("API: \(j.count) χαρακτήρες")
-                    candidates += videoURLs(in: j)
-                    if title.isEmpty, let m = regexFirst(#""title":"([^"]+)""#, j) { title = htmlUnescape(m[1]) }
-                    if candidates.isEmpty { cb.log("API απάντηση: " + String(clean(j).prefix(300))) }
-                } catch {
-                    cb.log("API σφάλμα: \(error.localizedDescription)")
+        // 1) API keyed by this exact deviation id: everything in it belongs to this video.
+        if !id.isEmpty {
+            let api = "https://www.deviantart.com/_napi/da-browse/shared_api/deviation/extended_fetch?deviationid=\(id)&username=\(user)&type=art&include_session=false"
+            do {
+                let j = try await f.text(api, referer: url)
+                cb.log("API: \(j.count) χαρακτήρες")
+                candidates += videoURLs(in: j)
+                if title.isEmpty, let m = regexFirst(#""title":"([^"]+)""#, j) { title = htmlUnescape(m[1]) }
+                cb.log("Βίντεο από API: \(candidates.count)")
+                if candidates.isEmpty { cb.log("API απάντηση: " + String(clean(j).prefix(300))) }
+            } catch {
+                cb.log("API σφάλμα: \(error.localizedDescription)")
+            }
+        }
+
+        // 2) Page: only the JSON object of THIS deviation (the page also holds other videos of the same artist).
+        if candidates.isEmpty, !html.isEmpty, !id.isEmpty {
+            let t = clean(html)
+            let chars = Array(t.utf8)
+            var found: [String] = []
+            for pat in ["\"deviationId\":\(id)", "\"deviationId\":\"\(id)\""] {
+                var from = t.startIndex
+                while let r = t.range(of: pat, range: from..<t.endIndex) {
+                    let pos = t.utf8.distance(from: t.startIndex, to: r.lowerBound)
+                    // walk back to the opening brace of the enclosing object
+                    var depth = 0, i = pos, start = -1
+                    while i >= 0 {
+                        let c = chars[i]
+                        if c == 125 { depth += 1 } else if c == 123 { if depth == 0 { start = i; break }; depth -= 1 }
+                        i -= 1
+                    }
+                    if start >= 0 {
+                        depth = 0; var e = start; var end = -1
+                        while e < chars.count {
+                            let c = chars[e]
+                            if c == 123 { depth += 1 } else if c == 125 { depth -= 1; if depth == 0 { end = e; break } }
+                            e += 1
+                        }
+                        if end > start, let sub = String(bytes: chars[start...end], encoding: .utf8) {
+                            found += videoURLs(in: sub)
+                        }
+                    }
+                    from = r.upperBound
                 }
             }
+            for u in found where !candidates.contains(u) { candidates.append(u) }
+            cb.log("Βίντεο από το αντικείμενο της σελίδας: \(candidates.count)")
         }
 
         // Fallback 2: oEmbed
