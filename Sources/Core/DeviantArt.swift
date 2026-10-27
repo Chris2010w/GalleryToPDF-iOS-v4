@@ -87,13 +87,37 @@ final class DeviantArtEngine {
             }
         }
 
-        guard let best = candidates.sorted(by: { score($0) > score($1) }).first else {
+        guard !candidates.isEmpty else {
             if html.lowercased().contains("log in") || html.lowercased().contains("mature") {
                 cb.log("Η σελίδα ζητά login / mature content.")
             }
             throw JobError.message("Δεν βρήκα βίντεο σε αυτό το link DeviantArt (δες το log).")
         }
-        cb.log("Επιλέχθηκε: \(best.prefix(140))")
+        // Check every candidate's real size: the page also contains tiny previews/other videos. Pick the biggest.
+        var sized: [(url: String, size: Int64)] = []
+        for c in candidates.prefix(12) {
+            var size: Int64 = -1
+            if let cu = URL(string: c) {
+                var r = URLRequest(url: cu)
+                r.httpMethod = "GET"
+                r.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+                r.setValue(desktopUA, forHTTPHeaderField: "User-Agent")
+                r.setValue("https://www.deviantart.com/", forHTTPHeaderField: "Referer")
+                if let (_, resp) = try? await URLSession.shared.data(for: r), let h = resp as? HTTPURLResponse {
+                    if let cr = h.value(forHTTPHeaderField: "Content-Range"), let tot = cr.split(separator: "/").last, let n = Int64(tot) { size = n }
+                    else { size = h.expectedContentLength }
+                    cb.log("• HTTP \(h.statusCode) \(size / 1024) KB  \(c.suffix(90))")
+                } else {
+                    cb.log("• δεν ανοίγει: \(c.suffix(90))")
+                }
+            }
+            sized.append((c, size))
+        }
+        guard let pick = sized.max(by: { $0.size < $1.size }), pick.size > 200_000 else {
+            throw JobError.message("Βρέθηκαν μόνο μικρά/άκυρα αρχεία βίντεο (δες το log).")
+        }
+        let best = pick.url
+        cb.log("Επιλέχθηκε (\(pick.size / 1_048_576) MB): \(best.prefix(140))")
 
         var ext = "mp4"
         if let r = try? NSRegularExpression(pattern: #"\.(mp4|webm|m4v)(?:\?|$)"#, options: .caseInsensitive),
